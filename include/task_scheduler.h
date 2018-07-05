@@ -21,6 +21,7 @@
 
 #include "php.h"
 
+typedef void* concurrent_fiber_context;
 typedef struct _concurrent_task concurrent_task;
 typedef struct _concurrent_context concurrent_context;
 
@@ -34,6 +35,8 @@ struct _concurrent_task_scheduler {
 	/* Task PHP object handle. */
 	zend_object std;
 
+	concurrent_fiber_context fiber;
+
 	/* Number of tasks scheduled to run. */
 	size_t scheduled;
 
@@ -42,6 +45,9 @@ struct _concurrent_task_scheduler {
 
 	/* Points to the last task to be run (needed to insert tasks into the run queue. */
 	concurrent_task *last;
+
+	/* Running task. */
+	concurrent_task *current;
 
 	concurrent_context *context;
 
@@ -58,6 +64,7 @@ struct _concurrent_task_scheduler {
 };
 
 zend_bool concurrent_task_scheduler_enqueue(concurrent_task *task);
+void concurrent_task_scheduler_suspend(concurrent_task *task, concurrent_task_scheduler *scheduler);
 
 void concurrent_task_scheduler_ce_register();
 

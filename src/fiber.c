@@ -73,6 +73,8 @@ zend_bool concurrent_fiber_switch_to(concurrent_fiber *fiber)
 void concurrent_fiber_run()
 {
 	concurrent_fiber *fiber;
+	concurrent_task *task;
+	zend_execute_data *exec;
 
 	fiber = TASK_G(current_fiber);
 	ZEND_ASSERT(fiber != NULL);
@@ -90,6 +92,7 @@ void concurrent_fiber_run()
 	fiber->exec->return_value = NULL;
 	fiber->exec->prev_execute_data = NULL;
 
+	exec = EG(current_execute_data);
 	EG(current_execute_data) = fiber->exec;
 
 	execute_ex(fiber->exec);
@@ -102,7 +105,34 @@ void concurrent_fiber_run()
 	fiber->stack = NULL;
 	fiber->exec = NULL;
 
-	concurrent_fiber_yield(fiber->fiber);
+	if (fiber->is_task) {
+		task = (concurrent_task *) fiber;
+
+		zend_fcall_info_args_clear(&task->fci, 1);
+
+		TASK_DEBUG_PRINTF(task, "Task run to completion");
+
+		if (UNEXPECTED(EG(exception))) {
+			ZVAL_OBJ(&task->result, EG(exception));
+			Z_ADDREF_P(&task->result);
+
+			EG(exception) = NULL;
+
+			task->status = CONCURRENT_FIBER_STATUS_DEAD;
+		}
+
+		EG(current_execute_data) = exec;
+
+		if (task->status == CONCURRENT_FIBER_STATUS_FINISHED) {
+			concurrent_task_notify_success(task);
+		} else if (task->status == CONCURRENT_FIBER_STATUS_DEAD) {
+			concurrent_task_notify_failure(task);
+		}
+
+		concurrent_task_scheduler_suspend(task, task->scheduler);
+	} else {
+		concurrent_fiber_yield(fiber->fiber);
+	}
 
 	abort();
 }

@@ -33,6 +33,8 @@ static zend_object_handlers concurrent_context_handlers;
 
 void concurrent_context_delegate_error(concurrent_context *context)
 {
+	concurrent_task *task;
+
 	zval error;
 	zval args[1];
 	zval retval;
@@ -59,7 +61,18 @@ void concurrent_context_delegate_error(concurrent_context *context)
 	}
 
 	if (UNEXPECTED(EG(exception))) {
-		zend_error_noreturn(E_ERROR, "Uncaught awaitable continuation error");
+		task = (concurrent_task *) TASK_G(current_fiber);
+
+		if (task == NULL) {
+			zend_error_noreturn(E_ERROR, "Uncaught awaitable continuation error");
+		}
+
+		ZEND_ASSERT(task->is_task);
+
+		TASK_G(fatal) = EG(exception);
+		EG(exception) = NULL;
+
+		concurrent_fiber_switch_context(task->fiber, task->scheduler->fiber);
 	}
 }
 

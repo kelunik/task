@@ -64,7 +64,7 @@ if test "$PHP_TASK" != "no"; then
     task_use_asm="no"
   fi
   
-  if test "$task_use_asm" = 'yes'; then
+  if test "$task_use_asm" = 'yes!'; then
     task_source_files="$task_source_files \
       src/fiber_asm.c \
       boost/asm/make_${task_asm_file} \

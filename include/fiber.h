@@ -37,6 +37,8 @@ struct _concurrent_fiber {
 	/* Fiber PHP object handle. */
 	zend_object std;
 
+	zend_bool is_task;
+
 	/* Status of the fiber, one of the CONCURRENT_FIBER_STATUS_* constants. */
 	zend_uchar status;
 

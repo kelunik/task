@@ -31,17 +31,35 @@ extern zend_module_entry task_module_entry;
 #define PHP_TASK_VERSION "0.1.0"
 
 #ifdef PHP_WIN32
-# define TASK_API __declspec(dllexport)
+#define PHP_TASK_API __declspec(dllexport)
 #elif defined(__GNUC__) && __GNUC__ >= 4
-# define TASK_API __attribute__ ((visibility("default")))
+#define PHP_TASK_API __attribute__ ((visibility("default")))
 #else
-# define TASK_API
+#define PHP_TASK_API
 #endif
 
 #ifdef ZTS
 #include "TSRM.h"
 #endif
 
+#define TASK_DEBUG 0
+
+#ifndef TASK_DEBUG
+#define TASK_DEBUG 0
+#endif
+
+#if TASK_DEBUG > 0
+#ifdef __GNUC__
+#define TASK_DEBUG_PRINT(message, ...) php_printf(message, ##__VA_ARGS__); php_printf("\n");
+#define TASK_DEBUG_PRINTF(fiber, message, ...) php_printf("[%d] ", (int) ((concurrent_task *) fiber)->id); php_printf(message, ##__VA_ARGS__); php_printf("\n");
+#else
+#define TASK_DEBUG_PRINT(message, ...) php_printf(message, __VA_ARGS__); php_printf("\n");
+#define TASK_DEBUG_PRINTF(fiber, message, ...) php_printf("[%d] ", (int) ((concurrent_task *) fiber)->id); php_printf(message, __VA_ARGS__); php_printf("\n");
+#endif
+#else
+#define TASK_DEBUG_PRINT(message, ...)
+#define TASK_DEBUG_PRINTF(fiber, message, ...)
+#endif
 
 ZEND_BEGIN_MODULE_GLOBALS(task)
 	/* Root fiber context (main thread). */
@@ -59,11 +77,13 @@ ZEND_BEGIN_MODULE_GLOBALS(task)
 	/* Active async task scheduler. */
 	concurrent_task_scheduler *scheduler;
 
+	zend_object *fatal;
+
 	size_t counter;
 
 ZEND_END_MODULE_GLOBALS(task)
 
-TASK_API ZEND_EXTERN_MODULE_GLOBALS(task)
+PHP_TASK_API ZEND_EXTERN_MODULE_GLOBALS(task)
 #define TASK_G(v) ZEND_MODULE_GLOBALS_ACCESSOR(task, v)
 
 #if defined(ZTS) && defined(COMPILE_DL_TASK)

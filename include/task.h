@@ -36,6 +36,8 @@ struct _concurrent_task {
 	/* Task PHP object handle. */
 	zend_object std;
 
+	zend_bool is_task;
+
 	/* Status of the task, one of the CONCURRENT_FIBER_STATUS_* constants. */
 	zend_uchar status;
 

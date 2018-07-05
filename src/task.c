@@ -36,52 +36,13 @@ static zend_object_handlers concurrent_task_continuation_handlers;
 static zend_object *concurrent_task_continuation_object_create(concurrent_task *task);
 
 
-void concurrent_task_start(concurrent_task *task)
-{
-	task->operation = CONCURRENT_TASK_OPERATION_NONE;
-	task->fiber = concurrent_fiber_create_context();
-
-	if (task->fiber == NULL) {
-		zend_throw_error(NULL, "Failed to create native fiber context");
-		return;
-	}
-
-	if (!concurrent_fiber_create(task->fiber, concurrent_fiber_run, task->stack_size)) {
-		zend_throw_error(NULL, "Failed to create native fiber");
-		return;
-	}
-
-	task->stack = (zend_vm_stack) emalloc(CONCURRENT_FIBER_VM_STACK_SIZE);
-	task->stack->top = ZEND_VM_STACK_ELEMENTS(task->stack) + 1;
-	task->stack->end = (zval *) ((char *) task->stack + CONCURRENT_FIBER_VM_STACK_SIZE);
-	task->stack->prev = NULL;
-
-	task->status = CONCURRENT_FIBER_STATUS_RUNNING;
-
-	if (!concurrent_fiber_switch_to((concurrent_fiber *) task)) {
-		zend_throw_error(NULL, "Failed switching to fiber");
-	}
-
-	zend_fcall_info_args_clear(&task->fci, 1);
-}
-
-void concurrent_task_continue(concurrent_task *task)
-{
-	task->operation = CONCURRENT_TASK_OPERATION_NONE;
-	task->status = CONCURRENT_FIBER_STATUS_RUNNING;
-
-	if (!concurrent_fiber_switch_to((concurrent_fiber *) task)) {
-		zend_throw_error(NULL, "Failed switching to fiber");
-	}
-}
-
 void concurrent_task_notify_success(concurrent_task *task)
 {
 	concurrent_task_continuation_cb *cont;
 
 	zval args[2];
 	zval retval;
-
+	TASK_DEBUG_PRINTF(task, "SUCCESS");
 	while (task->continuation != NULL) {
 		cont = task->continuation;
 		task->continuation = cont->next;
@@ -113,7 +74,7 @@ void concurrent_task_notify_failure(concurrent_task *task)
 
 	zval args[1];
 	zval retval;
-
+	TASK_DEBUG_PRINTF(task, "FAILURE");
 	while (task->continuation != NULL) {
 		cont = task->continuation;
 		task->continuation = cont->next;
@@ -146,6 +107,7 @@ static void concurrent_task_dispose(concurrent_task *task)
 	TASK_G(scheduler) = NULL;
 
 	task->status = CONCURRENT_FIBER_STATUS_DEAD;
+	task->is_task = 0;
 
 	concurrent_fiber_switch_to((concurrent_fiber *) task);
 
@@ -170,6 +132,7 @@ concurrent_task *concurrent_task_object_create()
 	task = emalloc(sizeof(concurrent_task));
 	ZEND_SECURE_ZERO(task, sizeof(concurrent_task));
 
+	task->is_task = 1;
 	task->status = CONCURRENT_FIBER_STATUS_INIT;
 
 	task->id = TASK_G(counter) + 1;
@@ -191,7 +154,7 @@ concurrent_task *concurrent_task_object_create()
 
 	zend_object_std_init(&task->std, concurrent_task_ce);
 	task->std.handlers = &concurrent_task_handlers;
-
+	TASK_DEBUG_PRINTF(task, "CTOR");
 	return task;
 }
 
@@ -235,6 +198,7 @@ static void concurrent_task_object_destroy(zend_object *object)
 	OBJ_RELEASE(&task->context->std);
 
 	concurrent_fiber_destroy(task->fiber);
+	TASK_DEBUG_PRINTF(task, "DTOR");
 
 	zend_object_std_dtor(&task->std);
 }
@@ -554,11 +518,12 @@ ZEND_METHOD(Task, await)
 	}
 
 	task->status = CONCURRENT_FIBER_STATUS_SUSPENDED;
-
+TASK_DEBUG_PRINTF(task, "-> SUSPEND");
 	CONCURRENT_FIBER_BACKUP_EG(task->stack, stack_page_size, task->exec);
-	concurrent_fiber_yield(task->fiber);
+	concurrent_task_scheduler_suspend(task, task->scheduler);
+//	concurrent_fiber_yield(task->fiber);
 	CONCURRENT_FIBER_RESTORE_EG(task->stack, stack_page_size, task->exec);
-
+TASK_DEBUG_PRINTF(task, "<- RESUME");
 	task->value = value;
 
 	if (task->status == CONCURRENT_FIBER_STATUS_DEAD) {
@@ -635,6 +600,7 @@ static zend_object *concurrent_task_continuation_object_create(concurrent_task *
 	cont->task = task;
 
 	GC_ADDREF(&task->std);
+	TASK_DEBUG_PRINTF(task, "ADDREF (cont): %d", GC_REFCOUNT(&task->std) - 1);
 
 	zend_object_std_init(&cont->std, concurrent_task_continuation_ce);
 	cont->std.handlers = &concurrent_task_continuation_handlers;
@@ -653,6 +619,7 @@ static void concurrent_task_continuation_object_destroy(zend_object *object)
 			concurrent_task_dispose(cont->task);
 		}
 
+		TASK_DEBUG_PRINTF(cont->task, "OBJ RELEASE (cont): %d", GC_REFCOUNT(&cont->task->std) - 1);
 		OBJ_RELEASE(&cont->task->std);
 	}
 
@@ -708,6 +675,7 @@ ZEND_METHOD(TaskContinuation, __invoke)
 		task->operation = CONCURRENT_TASK_OPERATION_RESUME;
 	}
 
+	TASK_DEBUG_PRINTF(task, "OBJ RELEASE (cont): %d", GC_REFCOUNT(&task->std) - 1);
 	OBJ_RELEASE(&task->std);
 }
 

@@ -62,6 +62,7 @@ zend_bool concurrent_task_scheduler_enqueue(concurrent_task *task)
 	}
 
 	GC_ADDREF(&task->std);
+	TASK_DEBUG_PRINTF(task, "ADDREF: %d", GC_REFCOUNT(&task->std) - 1);
 
 	scheduler->scheduled++;
 
@@ -79,6 +80,101 @@ zend_bool concurrent_task_scheduler_enqueue(concurrent_task *task)
 	}
 
 	return 1;
+}
+
+void concurrent_task_scheduler_suspend(concurrent_task *task, concurrent_task_scheduler *scheduler)
+{
+	concurrent_task *next;
+	concurrent_fiber_context source;
+
+	zend_execute_data *exec;
+	zend_vm_stack stack;
+	size_t stack_page_size;
+
+	ZEND_ASSERT(scheduler != NULL);
+	TASK_DEBUG_PRINT("=> SUSPEND / %d", (task == NULL) ? 0 : 1);
+
+	if (scheduler->current != NULL) {
+		TASK_DEBUG_PRINTF(scheduler->current, "OBJ RELEASE: %d", GC_REFCOUNT(&scheduler->current->std) - 1);
+		OBJ_RELEASE(&scheduler->current->std);
+	}
+
+	scheduler->current = task;
+
+	if (task == NULL) {
+		source = scheduler->fiber;
+	} else {
+		source = task->fiber;
+	}
+
+	while (1) {
+		if (scheduler->first == NULL) {
+			TASK_DEBUG_PRINT("-> RETURN");
+
+			CONCURRENT_FIBER_BACKUP_EG(stack, stack_page_size, exec);
+			concurrent_fiber_switch_context(source, scheduler->fiber);
+			CONCURRENT_FIBER_RESTORE_EG(stack, stack_page_size, exec);
+
+			break;
+		}
+
+		next = scheduler->first;
+
+		scheduler->first = next->next;
+		scheduler->scheduled--;
+
+		if (scheduler->last == next) {
+			scheduler->last = NULL;
+		}
+
+		next->next = NULL;
+
+		if (next->operation == CONCURRENT_TASK_OPERATION_NONE) {
+			TASK_DEBUG_PRINTF(next, "OBJ RELEASE (inlined): %d", GC_REFCOUNT(&next->std) - 1);
+			OBJ_RELEASE(&next->std);
+
+			continue;
+		}
+
+		if (next->operation == CONCURRENT_TASK_OPERATION_START) {
+			TASK_DEBUG_PRINTF(next, "-> START");
+
+			next->operation = CONCURRENT_TASK_OPERATION_NONE;
+			next->fiber = concurrent_fiber_create_context();
+
+			concurrent_fiber_create(next->fiber, concurrent_fiber_run, next->stack_size);
+
+			next->stack = (zend_vm_stack) emalloc(CONCURRENT_FIBER_VM_STACK_SIZE);
+			next->stack->top = ZEND_VM_STACK_ELEMENTS(next->stack) + 1;
+			next->stack->end = (zval *) ((char *) next->stack + CONCURRENT_FIBER_VM_STACK_SIZE);
+			next->stack->prev = NULL;
+
+			next->status = CONCURRENT_FIBER_STATUS_RUNNING;
+
+			TASK_G(current_fiber) = (concurrent_fiber *) next;
+
+			CONCURRENT_FIBER_BACKUP_EG(stack, stack_page_size, exec);
+			concurrent_fiber_switch_context(source, next->fiber);
+			CONCURRENT_FIBER_RESTORE_EG(stack, stack_page_size, exec);
+
+			zend_fcall_info_args_clear(&next->fci, 1);
+
+			break;
+		}
+
+		TASK_DEBUG_PRINTF(next, "-> RESUME");
+
+		next->operation = CONCURRENT_TASK_OPERATION_NONE;
+		next->status = CONCURRENT_FIBER_STATUS_RUNNING;
+
+		TASK_G(current_fiber) = (concurrent_fiber *) next;
+
+		CONCURRENT_FIBER_BACKUP_EG(stack, stack_page_size, exec);
+		concurrent_fiber_switch_context(source, next->fiber);
+		CONCURRENT_FIBER_RESTORE_EG(stack, stack_page_size, exec);
+
+		break;
+	}
 }
 
 
@@ -110,6 +206,7 @@ static void concurrent_task_scheduler_object_destroy(zend_object *object)
 		scheduler->scheduled--;
 		scheduler->first = task->next;
 
+		TASK_DEBUG_PRINTF(task, "OBJ RELEASE GC: %d", GC_REFCOUNT(&task->std) - 1);
 		OBJ_RELEASE(&task->std);
 	}
 
@@ -262,11 +359,29 @@ ZEND_METHOD(TaskScheduler, run)
 {
 	concurrent_task_scheduler *scheduler;
 	concurrent_task_scheduler *prev;
-	concurrent_task *task;
+	concurrent_fiber *fiber;
 
 	scheduler = (concurrent_task_scheduler *) Z_OBJ_P(getThis());
 
 	ZEND_PARSE_PARAMETERS_NONE();
+
+	if (scheduler->first == NULL) {
+		return;
+	}
+
+	fiber = TASK_G(current_fiber);
+
+	if (fiber != NULL) {
+		scheduler->fiber = fiber->fiber;
+	} else {
+		scheduler->fiber = TASK_G(root);
+
+		if (scheduler->fiber == NULL) {
+			scheduler->fiber = concurrent_fiber_create_root_context();
+
+			TASK_G(root) = scheduler->fiber;
+		}
+	}
 
 	prev = TASK_G(scheduler);
 	TASK_G(scheduler) = scheduler;
@@ -274,50 +389,36 @@ ZEND_METHOD(TaskScheduler, run)
 	scheduler->running = 1;
 	scheduler->activate = 0;
 
-	while (scheduler->first != NULL) {
-		task = scheduler->first;
+	TASK_DEBUG_PRINT("ENTER dispatch");
 
-		scheduler->scheduled--;
-		scheduler->first = task->next;
+	concurrent_task_scheduler_suspend(NULL, scheduler);
 
-		if (scheduler->last == task) {
-			scheduler->last = NULL;
-		}
+	TASK_DEBUG_PRINT("LEAVE dispatch");
 
-		// A task scheduled for start might have been inlined, do not take action in this case.
-		if (task->operation != CONCURRENT_TASK_OPERATION_NONE) {
-			task->next = NULL;
+	TASK_G(current_fiber) = fiber;
 
-			if (task->operation == CONCURRENT_TASK_OPERATION_START) {
-				concurrent_task_start(task);
-			} else {
-				concurrent_task_continue(task);
-			}
-
-			if (UNEXPECTED(EG(exception))) {
-				ZVAL_OBJ(&task->result, EG(exception));
-				EG(exception) = NULL;
-
-				task->status = CONCURRENT_FIBER_STATUS_DEAD;
-				concurrent_task_notify_failure(task);
-			} else {
-				if (task->status == CONCURRENT_FIBER_STATUS_FINISHED) {
-					concurrent_task_notify_success(task);
-				} else if (task->status == CONCURRENT_FIBER_STATUS_DEAD) {
-					concurrent_task_notify_failure(task);
-				}
-			}
-		}
-
-		OBJ_RELEASE(&task->std);
+	if (scheduler->current != NULL) {
+		TASK_DEBUG_PRINTF(scheduler->current, "OBJ RELEASE: %d", GC_REFCOUNT(&scheduler->current->std) - 1);
+		OBJ_RELEASE(&scheduler->current->std);
+		scheduler->current = NULL;
 	}
 
 	scheduler->last = NULL;
+	scheduler->fiber = NULL;
 
 	scheduler->running = 0;
 	scheduler->activate = 1;
 
 	TASK_G(scheduler) = prev;
+
+	if (UNEXPECTED(TASK_G(fatal))) {
+		EG(exception) = TASK_G(fatal);
+		TASK_G(fatal) = NULL;
+
+		zend_error_noreturn(E_ERROR, "Uncaught awaitable continuation error");
+	}
+
+//	TASK_DEBUG_PRINT("GC collected %d cycles", gc_collect_cycles());
 }
 
 ZEND_METHOD(TaskScheduler, __wakeup)
