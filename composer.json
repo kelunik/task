@@ -1,0 +1,20 @@
+{
+    "name": "php/ext-task",
+    "homepage": "https://github.com/concurrent-php/task",
+    "description": "Stubs for the ext-task extension.",
+    "keywords": [
+        "async",
+        "asynchronous",
+        "concurrency",
+        "promise",
+        "awaitable",
+        "future"
+    ],
+    "license": "PHP-3.01",
+    "require": {
+        "php": ">=7.2"
+    },
+    "support": {
+        "issues": "https://github.com/concurrent-php/task/issues"
+    }
+}
